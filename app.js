@@ -166,12 +166,79 @@ async function fetchForecasts(latitude, longitude, pastHours, forecastHours) {
 function initChart() {
   const ctx = $("windChart").getContext("2d");
 
+  // Custom Chart.js Plugin to draw direction arrows below the X-axis
+  const directionArrowsPlugin = {
+    id: 'directionArrows',
+    afterDraw(chart) {
+      const { ctx, chartArea: { left, right }, scales: { x } } = chart;
+      const showGusts = $("showGusts").checked;
+
+      // Filter points to show roughly every 2 hours to avoid overcrowding
+      function drawArrowTrack(points, yOffset, color, isObs = false) {
+        ctx.save();
+        ctx.strokeStyle = color;
+        ctx.fillStyle = color;
+        ctx.lineWidth = 1.5;
+
+        points.forEach(p => {
+          if (!p.time || p.direction === null || p.speed === 0) return;
+
+          // Align arrow X position with Chart.js time scale
+          const xPos = x.getPixelForValue(p.time);
+          if (xPos < left || xPos > right) return;
+
+          // Show every ~2 hours for forecasts, or every observation if spaced out
+          if (!isObs && p.time.getHours() % 2 !== 0) return;
+
+          // Wind direction + 180° so the arrow points where wind is blowing
+          const angle = ((p.direction + 180) % 360) * (Math.PI / 180);
+
+          ctx.save();
+          ctx.translate(xPos, yOffset);
+          ctx.rotate(angle);
+
+          // Draw Arrow Path
+          ctx.beginPath();
+          ctx.moveTo(0, 7);
+          ctx.lineTo(0, -7);
+          ctx.lineTo(-3, -2);
+          ctx.moveTo(0, -7);
+          ctx.lineTo(3, -2);
+          ctx.stroke();
+
+          ctx.restore();
+        });
+
+        ctx.restore();
+      }
+
+      // Track positions below the chart
+      const baseTop = chart.height - 45;
+
+      if (observations.length) {
+        drawArrowTrack(observations, baseTop, '#60c8ff', true);
+      }
+
+      forecasts.forEach((f, idx) => {
+        if (f.forecast) {
+          drawArrowTrack(f.forecast.points, baseTop + 18 + (idx * 16), f.color, false);
+        }
+      });
+    }
+  };
+
   chartInstance = new Chart(ctx, {
     type: 'line',
     data: { datasets: [] },
+    plugins: [directionArrowsPlugin],
     options: {
       responsive: true,
       maintainAspectRatio: false,
+      layout: {
+        padding: {
+          bottom: 55 // Leave room at the bottom for arrow tracks
+        }
+      },
       interaction: {
         mode: 'index',
         intersect: false,
@@ -308,7 +375,7 @@ function render() {
       : `Gust ${formatSpeed(latest.gust)} ${unit().label}`;
 
     $("needle").style.visibility = latest.direction === null || latest.speed === 0 ? "hidden" : "visible";
-    $("needle").style.transform = `rotate(${latest.direction || 0}deg)`;
+    $("needle").style.transform = `rotate(${(latest.direction + 180) % 360}deg)`;
 
     $("measurement").textContent = "Obs: " + latest.time.toLocaleString([], {
       month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", timeZoneName: "short"

@@ -162,7 +162,7 @@ button:disabled { opacity: .6; cursor: wait; }
 
 .chart-container {
   position: relative;
-  height: 380px;
+  height: 420px;
   width: 100%;
 }
 
