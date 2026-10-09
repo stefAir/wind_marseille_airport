@@ -406,7 +406,8 @@ function updateChart() {
     borderColor: '#60c8ff',
     backgroundColor: '#60c8ff',
     borderWidth: 2,
-    pointRadius: 2,
+    pointRadius: 0,
+    pointHoverRadius: 0,
     spanGaps: false
   });
 
