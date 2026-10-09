@@ -1,8 +1,14 @@
 "use strict";
 
-// Le Jaï Spot Coordinates from Windguru
-const LE_JAI_LAT = 43.4111;
-const LE_JAI_LON = 5.1604;
+const LE_JAI_LAT = 43.436188;
+const LE_JAI_LON = 5.192063;
+const FR_TIME_ZONE = "Europe/Paris";
+const HISTORY_HOURS = 30 * 24;
+const HOUR_MS = 60 * 60 * 1000;
+const frenchTimestamp = new Intl.DateTimeFormat("fr-FR", {
+  timeZone: FR_TIME_ZONE,
+  month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", timeZoneName: "short"
+});
 
 const UNIT_KEY = "lfml-wind-units";
 const GUST_KEY = "lfml-show-gusts";
@@ -35,7 +41,14 @@ function formatSpeed(value) {
 }
 
 function clock(date) {
-  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return date.toLocaleTimeString("fr-FR", {
+    timeZone: FR_TIME_ZONE, hour: "2-digit", minute: "2-digit", timeZoneName: "short"
+  });
+}
+
+function defaultChartRange() {
+  const now = Date.now();
+  return { min: now - 24 * HOUR_MS, max: now + 24 * HOUR_MS };
 }
 
 function numberOrNull(value) {
@@ -144,10 +157,10 @@ async function fetchWindForecast(latitude, longitude, model, pastHours, forecast
   };
 }
 
-async function fetchForecasts(latitude, longitude, pastHours, forecastHours) {
+async function fetchForecasts(latitude, longitude, pastHours) {
   const models = [
-    { id: "meteofrance_arome_france_hd", label: "AROME France HD", color: "#ff9f43" },
-    { id: "icon_eu", label: "ICON-EU", color: "#a55eea" }
+    { id: "meteofrance_arome_france_hd", label: "AROME France HD", color: "#ff9f43", forecastHours: 48, gridResolutionKm: 1.5 },
+    { id: "icon_eu", label: "ICON-EU", color: "#a55eea", forecastHours: 120, gridResolutionKm: 7 }
   ];
 
   return Promise.all(models.map(async m => {
@@ -155,16 +168,84 @@ async function fetchForecasts(latitude, longitude, pastHours, forecastHours) {
       return {
         label: m.label,
         color: m.color,
-        forecast: await fetchWindForecast(latitude, longitude, m.id, pastHours, forecastHours)
+        gridResolutionKm: m.gridResolutionKm,
+        forecast: await fetchWindForecast(latitude, longitude, m.id, pastHours, m.forecastHours)
       };
     } catch (error) {
-      return { label: m.label, color: m.color, error: error.message };
+      return { label: m.label, color: m.color, gridResolutionKm: m.gridResolutionKm, error: error.message };
     }
   }));
 }
 
 function initChart() {
   const ctx = $("windChart").getContext("2d");
+
+  const daylightBackgroundPlugin = {
+    id: 'daylightBackground',
+    beforeDraw(chart) {
+      const { ctx, chartArea, scales: { x } } = chart;
+      if (!chartArea || !Number.isFinite(x.min) || !Number.isFinite(x.max)) return;
+      const { left, right, top, bottom } = chartArea;
+      let day = luxon.DateTime.fromMillis(x.min, { zone: FR_TIME_ZONE }).startOf('day');
+      ctx.save();
+      ctx.fillStyle = '#0e1626';
+      ctx.fillRect(left, top, right - left, bottom - top);
+      ctx.fillStyle = '#384039';
+      while (day.toMillis() <= x.max) {
+        const { sunrise, sunset } = SunCalc.getTimes(day.plus({ hours: 12 }).toJSDate(), LE_JAI_LAT, LE_JAI_LON);
+        const start = Math.max(left, x.getPixelForValue(sunrise.getTime()));
+        const end = Math.min(right, x.getPixelForValue(sunset.getTime()));
+        if (Number.isFinite(start) && Number.isFinite(end) && end > start) {
+          ctx.fillRect(start, top, end - start, bottom - top);
+          if (end - start >= 24) {
+            ctx.save();
+            ctx.fillStyle = '#ffd166';
+            ctx.font = '20px "Segoe UI Symbol", sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('\u2600', (start + end) / 2, top + 16);
+            ctx.restore();
+          }
+        }
+        day = day.plus({ days: 1 });
+      }
+      ctx.restore();
+    }
+  };
+
+  const referenceLinesPlugin = {
+    id: 'referenceLines',
+    beforeDatasetsDraw(chart) {
+      const { ctx, chartArea: { left, right, top, bottom }, scales: { x, y } } = chart;
+      const thresholdY = y.getPixelForValue(15 * unit().factor);
+      const nowX = x.getPixelForValue(Date.now());
+      ctx.save();
+      ctx.lineWidth = 1;
+      ctx.font = '11px sans-serif';
+      if (thresholdY >= top && thresholdY <= bottom) {
+        ctx.strokeStyle = '#69e69b';
+        ctx.fillStyle = '#69e69b';
+        ctx.beginPath();
+        ctx.moveTo(left, thresholdY);
+        ctx.lineTo(right, thresholdY);
+        ctx.stroke();
+        ctx.textAlign = 'right';
+        ctx.fillText('15 kn', right - 4, thresholdY < top + 18 ? thresholdY + 13 : thresholdY - 5);
+      }
+      if (nowX >= left && nowX <= right) {
+        ctx.strokeStyle = '#d5e3ed';
+        ctx.fillStyle = '#d5e3ed';
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        ctx.moveTo(nowX, top);
+        ctx.lineTo(nowX, bottom);
+        ctx.stroke();
+        ctx.textAlign = 'left';
+        ctx.fillText('Now', Math.min(nowX + 5, right - 27), top + 32);
+      }
+      ctx.restore();
+    }
+  };
 
   // Custom Chart.js Plugin to draw direction arrows below the X-axis
   const directionArrowsPlugin = {
@@ -179,6 +260,7 @@ function initChart() {
         ctx.strokeStyle = color;
         ctx.fillStyle = color;
         ctx.lineWidth = 1.5;
+        let lastArrowX = -Infinity;
 
         points.forEach(p => {
           if (!p.time || p.direction === null || p.speed === 0) return;
@@ -188,7 +270,9 @@ function initChart() {
           if (xPos < left || xPos > right) return;
 
           // Show every ~2 hours for forecasts, or every observation if spaced out
-          if (!isObs && p.time.getHours() % 2 !== 0) return;
+          if (!isObs && luxon.DateTime.fromJSDate(p.time, { zone: FR_TIME_ZONE }).hour % 2 !== 0) return;
+          if (xPos - lastArrowX < 14) return;
+          lastArrowX = xPos;
 
           // Wind direction + 180° so the arrow points where wind is blowing
           const angle = ((p.direction + 180) % 360) * (Math.PI / 180);
@@ -230,7 +314,7 @@ function initChart() {
   chartInstance = new Chart(ctx, {
     type: 'line',
     data: { datasets: [] },
-    plugins: [directionArrowsPlugin],
+    plugins: [daylightBackgroundPlugin, referenceLinesPlugin, directionArrowsPlugin],
     options: {
       responsive: true,
       maintainAspectRatio: false,
@@ -246,16 +330,40 @@ function initChart() {
       scales: {
         x: {
           type: 'time',
+          ...defaultChartRange(),
+          adapters: {
+            date: { zone: FR_TIME_ZONE, locale: 'fr-FR' }
+          },
+          title: {
+            display: true,
+            text: 'Europe/Paris (CET / CEST)',
+            color: '#a4b3ca'
+          },
           time: {
+            tooltipFormat: 'dd LLL yyyy HH:mm ZZZZ',
             displayFormats: {
-              hour: 'M/d HH:mm'
+              hour: 'dd/MM HH:mm',
+              day: 'dd/MM'
             }
           },
           grid: { color: '#354258' },
-          ticks: { color: '#a4b3ca' }
+          ticks: {
+            color: '#a4b3ca',
+            maxTicksLimit: 6,
+            maxRotation: 0,
+            minRotation: 0,
+            autoSkipPadding: 12,
+            callback(value) {
+              const time = luxon.DateTime.fromMillis(Number(value), { zone: FR_TIME_ZONE });
+              return this.max - this.min <= 7 * 24 * HOUR_MS
+                ? [time.toFormat('HH:mm'), time.toFormat('dd/MM')]
+                : time.toFormat('dd/MM');
+            }
+          }
         },
         y: {
           beginAtZero: true,
+          suggestedMax: 16 * unit().factor,
           title: {
             display: true,
             text: unit().label,
@@ -346,6 +454,13 @@ function updateChart() {
 
   chartInstance.data.datasets = datasets;
   chartInstance.options.scales.y.title.text = unit().label;
+  chartInstance.options.scales.y.suggestedMax = 16 * unit().factor;
+  const timestamps = datasets.flatMap(dataset => dataset.data.map(point => point.x.getTime()));
+  if (timestamps.length) {
+    chartInstance.options.plugins.zoom.limits = {
+      x: { min: Math.min(...timestamps), max: Math.max(...timestamps), minRange: HOUR_MS }
+    };
+  }
   chartInstance.update();
 }
 
@@ -363,7 +478,29 @@ function updateAge() {
   }
 }
 
+function forecastSpeedAtTime(speedsByTime, time) {
+  const timestamp = time.getTime();
+  if (speedsByTime.has(timestamp)) return speedsByTime.get(timestamp);
+  const before = Math.floor(timestamp / HOUR_MS) * HOUR_MS;
+  const beforeSpeed = speedsByTime.get(before);
+  const afterSpeed = speedsByTime.get(before + HOUR_MS);
+  if (beforeSpeed == null || afterSpeed == null) return null;
+  return beforeSpeed + (afterSpeed - beforeSpeed) * (timestamp - before) / HOUR_MS;
+}
+
+function gridDistanceKm(latitude, longitude) {
+  const toRadians = degrees => degrees * Math.PI / 180;
+  const deltaLatitude = toRadians(latitude - LE_JAI_LAT);
+  const deltaLongitude = toRadians(longitude - LE_JAI_LON);
+  const haversine = Math.min(1, Math.sin(deltaLatitude / 2) ** 2 +
+    Math.cos(toRadians(LE_JAI_LAT)) * Math.cos(toRadians(latitude)) * Math.sin(deltaLongitude / 2) ** 2);
+  return 6371.0088 * 2 * Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine));
+}
+
 function render() {
+  const modelSpeeds = forecasts.map(model => new Map(
+    (model.forecast?.points ?? []).map(point => [point.time.getTime(), point.speed])
+  ));
   if (observations.length) {
     const latest = observations[observations.length - 1];
 
@@ -377,16 +514,19 @@ function render() {
     $("needle").style.visibility = latest.direction === null || latest.speed === 0 ? "hidden" : "visible";
     $("needle").style.transform = `rotate(${(latest.direction + 180) % 360}deg)`;
 
-    $("measurement").textContent = "Obs: " + latest.time.toLocaleString([], {
-      month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", timeZoneName: "short"
-    });
+    $("measurement").textContent = "Obs: " + frenchTimestamp.format(latest.time);
 
     $("rows").innerHTML = [...observations].reverse().map(row => `
       <tr>
-        <td>${row.time.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</td>
+        <td>${frenchTimestamp.format(row.time)}</td>
         <td>${formatSpeed(row.speed)} ${unit().label}</td>
         <td>${directionText(row)}</td>
-        <td>${row.gust === null ? "—" : formatSpeed(row.gust)}</td>
+        ${modelSpeeds.map(speeds => {
+          const speed = forecastSpeedAtTime(speeds, row.time);
+          const description = speed === null ? "Model value unavailable"
+            : speeds.has(row.time.getTime()) ? "Hourly model value" : "Linearly interpolated hourly model value";
+          return `<td title="${description}">${speed === null ? "—" : `${formatSpeed(speed)} ${unit().label}`}</td>`;
+        }).join("")}
       </tr>
     `).join("");
   }
@@ -394,9 +534,10 @@ function render() {
   let detailsHtml = `<strong>Target Coordinates (Le Jaï):</strong> ${LE_JAI_LAT}, ${LE_JAI_LON}<br>`;
   forecasts.forEach(f => {
     if (f.forecast) {
-      detailsHtml += `<strong>${f.label}:</strong> Nearest grid cell at ${f.forecast.gridLatitude.toFixed(4)}°, ${f.forecast.gridLongitude.toFixed(4)}°<br>`;
+      const distance = gridDistanceKm(f.forecast.gridLatitude, f.forecast.gridLongitude);
+      detailsHtml += `<strong>${f.label}:</strong> Approx. grid resolution ${f.gridResolutionKm} km; nearest grid cell center at ${f.forecast.gridLatitude.toFixed(4)}°, ${f.forecast.gridLongitude.toFixed(4)}°; ${distance.toFixed(2)} km from Le Jaï<br>`;
     } else {
-      detailsHtml += `<strong>${f.label}:</strong> Failed to load (${f.error})<br>`;
+      detailsHtml += `<strong>${f.label}:</strong> Approx. grid resolution ${f.gridResolutionKm} km; failed to load (${f.error})<br>`;
     }
   });
   $("modelDetails").innerHTML = detailsHtml;
@@ -412,13 +553,10 @@ async function load() {
   $("status").textContent = "Loading…";
   $("error").textContent = "";
 
-  const pastHours = $("historyHours").value;
-  const forecastHours = $("forecastHours").value;
-
   try {
     const [obsResult, fcResults] = await Promise.all([
-      fetchObservations(pastHours),
-      fetchForecasts(LE_JAI_LAT, LE_JAI_LON, pastHours, forecastHours)
+      fetchObservations(HISTORY_HOURS),
+      fetchForecasts(LE_JAI_LAT, LE_JAI_LON, HISTORY_HOURS)
     ]);
 
     observations = obsResult;
@@ -437,8 +575,6 @@ async function load() {
 
 // Event Listeners
 $("refresh").addEventListener("click", load);
-$("historyHours").addEventListener("change", load);
-$("forecastHours").addEventListener("change", load);
 
 $("units").addEventListener("change", () => {
   try { localStorage.setItem(UNIT_KEY, $("units").value); } catch (_) {}
@@ -451,7 +587,7 @@ $("showGusts").addEventListener("change", () => {
 });
 
 $("resetZoom").addEventListener("click", () => {
-  if (chartInstance) chartInstance.resetZoom();
+  if (chartInstance) chartInstance.zoomScale('x', defaultChartRange(), 'none');
 });
 
 // Initialize Chart and Load Initial Data
