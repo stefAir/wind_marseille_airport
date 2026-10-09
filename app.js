@@ -365,7 +365,7 @@ function initChart() {
           beginAtZero: true,
           suggestedMax: 16 * unit().factor,
           title: {
-            display: true,
+            display: () => !window.matchMedia('(max-width: 600px)').matches,
             text: unit().label,
             color: '#a4b3ca'
           },
